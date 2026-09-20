@@ -1,0 +1,17 @@
+# Python
+venv/
+__pycache__/
+*.py[cod]
+
+# Runtime report state (live sports data and delivery ledger)
+data/pac-soccer/*.json
+
+# Local configuration / secrets, if added later
+.env
+.env.*
+!.env.example
+
+# Editor / OS files
+.DS_Store
+.vscode/
+.idea/
