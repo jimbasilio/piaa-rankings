@@ -3,6 +3,10 @@ venv/
 __pycache__/
 *.py[cod]
 
+# Node / TypeScript build output
+node_modules/
+dist/
+
 # Runtime report state (live sports data and delivery ledger)
 data/pac-soccer/*.json
 
