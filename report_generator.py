@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Build a verified daily PIAA District 1 PAC boys-soccer report."""
 import json
+import os
 import re
+import subprocess
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -16,8 +18,10 @@ CURRENT_STANDINGS_FILE = DATA_DIR / "current-standings.json"
 CURRENT_GAMES_FILE = DATA_DIR / "current-games.json"
 LAST_GAME_SUMMARY_FILE = DATA_DIR / "last-game-summary.json"
 ROUNDUP_LEDGER_FILE = DATA_DIR / "pv-roundup-notices.json"
+NEWSLETTER_STATE_FILE = DATA_DIR / "athletic-newsletter-state.json"
 STANDINGS_URL = "https://www.piaad1.org/sports/fall-sports/soccer-b/scores-and-rankings/"
 ROUNDUP_INDEX_URL = "https://www.pottsmerc.com/sports/high-school-sports/"
+YOUTUBE_SEARCH_URL = "https://www.googleapis.com/youtube/v3/search"
 TZ = ZoneInfo("America/New_York")
 HEADERS = {"User-Agent": "PAC-Soccer-Daily-Report/1.0 (+local cron job)"}
 
@@ -49,6 +53,16 @@ def clean(text): return " ".join(text.split()).strip()
 def write_json(path, value):
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value, separators=(",", ":")), encoding="utf-8")
+
+def load_local_env():
+    """Load the one local API key needed by this project without logging it."""
+    env_file = BASE_DIR / ".env"
+    try:
+        for line in env_file.read_text(encoding="utf-8").splitlines():
+            if line.startswith("YOUTUBE_API_KEY=") and not os.environ.get("YOUTUBE_API_KEY"):
+                os.environ["YOUTUBE_API_KEY"] = line.split("=", 1)[1].strip().strip('"').strip("'")
+    except OSError:
+        pass
 
 def fetch(url):
     try:
@@ -240,6 +254,20 @@ def read_previous():
         return snapshot["teams"] if isinstance(snapshot.get("teams"), dict) else {}
     except (OSError, json.JSONDecodeError): return {}
 
+def read_current_standings():
+    try:
+        snapshot = json.loads(CURRENT_STANDINGS_FILE.read_text(encoding="utf-8"))
+        teams = snapshot.get("teams")
+        return {item["team"]: item for item in teams} if isinstance(teams, list) and {item.get("team") for item in teams} == set(ALL_TEAMS) else None
+    except (OSError, json.JSONDecodeError, TypeError):
+        return None
+
+def standings_changed(current, previous):
+    if previous is None or set(current) != set(previous):
+        return True
+    fields = ("classification", "seed", "wins", "losses", "ties")
+    return any(any(current[team].get(field) != previous[team].get(field) for field in fields) for team in ALL_TEAMS)
+
 def movement(current, previous):
     result = {}
     for team in ALL_TEAMS:
@@ -250,6 +278,32 @@ def movement(current, previous):
         elif value["seed"] > prior["seed"]: result[team] = "📉"
         else: result[team] = "⚖️"
     return result
+
+def ranking_highlights(current, previous):
+    """Return a compact, early callout for the most meaningful verified Seed changes."""
+    changes = []
+    for team, standing in current.items():
+        prior = previous.get(team)
+        if not prior or prior.get("classification") != standing["classification"] or not isinstance(prior.get("seed"), int):
+            continue
+        places = prior["seed"] - standing["seed"]
+        if places:
+            changes.append((team, places))
+    if not changes:
+        return []
+    changes.sort(key=lambda item: (-abs(item[1]), item[0]))
+    selected = changes[:3]
+    pv_change = next((item for item in changes if item[0] == "Perkiomen Valley"), None)
+    if pv_change and pv_change not in selected:
+        selected[-1] = pv_change
+    lines = ["🚨 **Rankings on the Move**"]
+    for team, places in selected:
+        direction = "rises" if places > 0 else "falls"
+        emoji = "📈" if places > 0 else "📉"
+        lines.append(f"{emoji} **{team} {direction} {abs(places)} place{'s' if abs(places) != 1 else ''}!**")
+    if len(changes) > len(selected):
+        lines.append(f"Plus {len(changes) - len(selected)} more PAC ranking change{'s' if len(changes) - len(selected) != 1 else ''} on the board.")
+    return lines
 
 def game_line(team, standing, response):
     if response["error"]: return f"**{team}:** ❓ Most recent result unavailable; source could not be verified."
@@ -301,11 +355,116 @@ def has_new_games_since_summary(games, previous_summary):
         return True
     return previous_summary is None or game_snapshot(games) != previous_summary
 
-def generate_report(standings, games, moves, previous, has_new_games, roundup):
+def get_positioning_videos():
+    """Return a small, kid-appropriate set of YouTube positioning tutorials on quiet days."""
+    key = os.environ.get("YOUTUBE_API_KEY")
+    if not key:
+        return []
+    videos = []
+    for query, limit in (("soccer winger positioning tutorial", 2), ("soccer midfielder positioning tutorial", 1)):
+        try:
+            response = requests.get(YOUTUBE_SEARCH_URL, params={
+                "key": key, "part": "snippet", "type": "video", "maxResults": limit,
+                "q": query, "safeSearch": "strict", "videoEmbeddable": "true",
+            }, timeout=20)
+            response.raise_for_status()
+            for item in response.json().get("items", []):
+                video_id = item.get("id", {}).get("videoId")
+                title = clean(item.get("snippet", {}).get("title", ""))
+                if video_id and title:
+                    videos.append({"title": title, "url": f"https://www.youtube.com/watch?v={video_id}"})
+        except (requests.RequestException, ValueError, TypeError):
+            return []
+    return videos[:3]
+
+def newsletter_lines(body):
+    """Extract the Varsity Boys Soccer block from ParentSquare's text/HTML email body."""
+    lines = []
+    selected = False
+    for raw_line in body.replace("&nbsp;", " ").splitlines():
+        line = clean(raw_line.replace("|", " "))
+        heading = re.fullmatch(r"#{1,6}\s*(.*?)\s*", line)
+        title = heading.group(1) if heading else ""
+        normalized_title = re.sub(r"[^a-z]", "", title.lower())
+        is_boys_soccer = normalized_title in {"varsityboyssoccer", "varsityboyssoccer", "varsitysoccer"}
+        if is_boys_soccer:
+            selected = True
+            continue
+        if selected and heading:
+            break
+        if selected and line and not line.startswith("<!--"):
+            lines.append(line)
+    return lines
+
+def get_latest_athletic_newsletter():
+    """Read the latest verified Athletic Newsletter and return only the Varsity Boys Soccer notes."""
+    try:
+        search = subprocess.run(
+            ["gog", "gmail", "messages", "search", 'subject:"Athletic Newsletter"', "--max", "10", "--json", "--no-input"],
+            capture_output=True, text=True, timeout=45, check=True,
+        )
+        messages = json.loads(search.stdout).get("messages", [])
+    except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
+        return None
+    for message in messages:
+        sender = message.get("from", "").lower()
+        if "parentsquare" not in sender and "pvsd.org" not in sender:
+            continue
+        try:
+            detail = subprocess.run(
+                ["gog", "gmail", "get", message["id"], "--json", "--no-input"],
+                capture_output=True, text=True, timeout=45, check=True,
+            )
+            body = json.loads(detail.stdout).get("body", "")
+        except (KeyError, OSError, subprocess.SubprocessError, json.JSONDecodeError):
+            continue
+        notes = newsletter_lines(body)
+        if notes:
+            return {"message_id": message["id"], "date": message.get("internalDateIso", message.get("date", "")), "notes": notes}
+    return None
+
+def read_newsletter_state():
+    try:
+        state = json.loads(NEWSLETTER_STATE_FILE.read_text(encoding="utf-8"))
+        return state if isinstance(state, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+def format_newsletter_notes(notes):
+    """Turn the newsletter's flat email text into compact report-ready blocks."""
+    lines, in_schedule = [], False
+    for note in notes:
+        label, separator, detail = note.partition(":")
+        normalized_label = label.lower().strip()
+        if separator and normalized_label.startswith("results from last week"):
+            lines += ["🏁 **Last Week’s Results**", detail.strip()]
+            in_schedule = False
+        elif separator and normalized_label.startswith("unsung athletes of the week"):
+            lines += ["🏅 **Unsung Athlete of the Week**", detail.strip()]
+            in_schedule = False
+        elif separator and normalized_label.startswith("events this week"):
+            lines += ["📅 **This Week’s Schedule**", f"• {detail.strip()}"]
+            in_schedule = True
+        elif in_schedule:
+            lines.append(f"• {note}")
+        else:
+            lines.append(note)
+    return lines
+
+def generate_report(standings, games, moves, previous, has_new_games, roundup, newsletter, quiet, videos):
     current = {item["team"]: item for item in standings["teams"]}
     games_by_team = {item["team"]: item for item in games}
     now, pv = datetime.now(TZ), current.get("Perkiomen Valley")
     lines = ["⚽ **Perkiomen Valley Soccer Daily Update!** ⚽", f"📅 **{now.strftime('%A, %B')} {now.day}, {now.year}**", "", "💙 **PV Check-In**"]
+    if quiet:
+        lines += ["📣 **No new PAC updates today—but the soccer focus stays strong!**", "The standings are unchanged, no new completed PAC games were recorded, and there’s no new Mercury PV recap to share. Team Together! ⚽"]
+        if newsletter:
+            lines += ["", "📬 **From the Athletic Director’s Newsletter**"]
+            lines.extend(format_newsletter_notes(newsletter["notes"]))
+        if videos:
+            lines += ["", "🎥 **Mickey’s Positioning Corner**", "No fresh scoreboard news means it’s a great day to sharpen the soccer IQ. Here are three optional positioning videos:", ""]
+            lines.extend(f"**{index}.** [{video['title']}]({video['url']})" for index, video in enumerate(videos, start=1))
+        return "\n".join(lines).rstrip()
     if pv:
         lines += [f"Rank: **#{pv['seed']}/{pv['classification']}** {moves['Perkiomen Valley']}", f"Record: **{pv['wins']}-{pv['losses']}-{pv['ties']}**", ""]
         recent = games_by_team["Perkiomen Valley"]["game"]
@@ -314,6 +473,12 @@ def generate_report(standings, games, moves, previous, has_new_games, roundup):
         else:
             lines.append("PV is on the move with a verified win in its latest action! 💪" if recent and recent["outcome"] == "win" else "The Vikings are holding strong in the current District 1 standings. 🛡️")
     else: lines += ["Rank: **Data unavailable ❓**", "Record: **Data unavailable ❓**", "", "PV’s live standing could not be verified this run."]
+    highlights = ranking_highlights(current, previous)
+    if highlights:
+        lines += [""] + highlights
+    if newsletter:
+        lines += ["", "📬 **From the Athletic Director’s Newsletter**"]
+        lines.extend(format_newsletter_notes(newsletter["notes"]))
     if roundup:
         game = roundup["game"]
         formatted_date = datetime.strptime(game["date"], "%Y-%m-%d").strftime("%B %-d, %Y")
@@ -356,12 +521,20 @@ def valid_standings(response):
     return response["error"] is None and len(teams) == 12 and {item["team"] for item in teams} == set(ALL_TEAMS) and all(item["classification"] in {"1A", "2A", "3A", "4A"} and all(isinstance(item[key], int) for key in ("seed", "wins", "losses", "ties")) for item in teams)
 
 def main():
+    load_local_env()
+    previous_current = read_current_standings()
     standings = get_standings(); write_json(CURRENT_STANDINGS_FILE, standings)
     previous = read_previous(); current = {item["team"]: item for item in standings["teams"]}
     games = [get_game_history(team) for team in ALL_TEAMS]; write_json(CURRENT_GAMES_FILE, games)
     new_games = has_new_games_since_summary(games, read_last_game_summary())
     roundup = find_new_pv_roundup()
-    print(generate_report(standings, games, movement(current, previous), previous, new_games, roundup))
+    newsletter = get_latest_athletic_newsletter()
+    newsletter_state = read_newsletter_state()
+    newsletter_is_new = newsletter is not None and newsletter["message_id"] != newsletter_state.get("message_id")
+    quiet = valid_standings(standings) and all(response["error"] is None for response in games) and not standings_changed(current, previous_current) and not new_games and roundup is None and not newsletter_is_new
+    videos = get_positioning_videos() if quiet else []
+    report_newsletter = newsletter if newsletter_is_new else None
+    print(generate_report(standings, games, movement(current, previous), previous, new_games, roundup, report_newsletter, quiet, videos))
     if new_games and all(response["error"] is None for response in games):
         write_json(LAST_GAME_SUMMARY_FILE, {"summary_date": datetime.now(TZ).date().isoformat(), "games": game_snapshot(games)})
     if valid_standings(standings):
@@ -371,5 +544,7 @@ def main():
         ledger = read_roundup_ledger()
         ledger["delivered"].append({"game_key": roundup["game_key"], "article_url": roundup["url"], "delivered_at": now_iso()})
         write_json(ROUNDUP_LEDGER_FILE, ledger)
+    if newsletter:
+        write_json(NEWSLETTER_STATE_FILE, {"message_id": newsletter["message_id"], "retrieved_at": now_iso()})
 
 if __name__ == "__main__": main()
