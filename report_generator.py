@@ -437,13 +437,13 @@ def format_newsletter_notes(notes):
         label, separator, detail = note.partition(":")
         normalized_label = label.lower().strip()
         if separator and normalized_label.startswith("results from last week"):
-            lines += ["🏁 **Last Week’s Results**", detail.strip()]
+            lines += ["", "🏁 **Last Week’s Results**", detail.strip()]
             in_schedule = False
         elif separator and normalized_label.startswith("unsung athletes of the week"):
-            lines += ["🏅 **Unsung Athlete of the Week**", detail.strip()]
+            lines += ["", "🏅 **Unsung Athlete of the Week**", detail.strip()]
             in_schedule = False
         elif separator and normalized_label.startswith("events this week"):
-            lines += ["📅 **This Week’s Schedule**", f"• {detail.strip()}"]
+            lines += ["", "📅 **This Week’s Schedule**", f"• {detail.strip()}"]
             in_schedule = True
         elif in_schedule:
             lines.append(f"• {note}")
