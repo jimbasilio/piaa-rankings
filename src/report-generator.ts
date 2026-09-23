@@ -12,10 +12,9 @@ const DATA_DIR = `${BASE_DIR}/data/pac-soccer`;
 const FILES = {
   previous: `${DATA_DIR}/previous-standings.json`, current: `${DATA_DIR}/current-standings.json`,
   games: `${DATA_DIR}/current-games.json`, summary: `${DATA_DIR}/last-game-summary.json`,
-  roundup: `${DATA_DIR}/pv-roundup-notices.json`, newsletter: `${DATA_DIR}/athletic-newsletter-state.json`,
+  newsletter: `${DATA_DIR}/athletic-newsletter-state.json`,
 };
 const STANDINGS_URL = "https://www.piaad1.org/sports/fall-sports/soccer-b/scores-and-rankings/";
-const ROUNDUP_INDEX_URL = "https://www.pottsmerc.com/sports/high-school-sports/";
 const YOUTUBE_SEARCH_URL = "https://www.googleapis.com/youtube/v3/search";
 const HEADERS = { "User-Agent": "PAC-Soccer-Daily-Report/1.0 (+local cron job)" };
 
@@ -37,7 +36,6 @@ type Standing = { team: string; classification: string; seed: number; wins: numb
 type Game = { date: string; opponent: string; team_score: number; opponent_score: number; outcome: "win" | "loss" | "tie"; note: string | null };
 type GameResponse = { team: string; source_url: string; retrieved_at: string; game: Game | null; error: string | null };
 type Newsletter = { message_id: string; date: string; notes: string[] };
-type Roundup = { game_key: string; url: string; game: Pick<Game, "date" | "opponent" | "team_score" | "opponent_score">; recap: string };
 
 const MICKEY_ENCOURAGEMENT = [
   "⚽ Mickey, bring your energy and enjoy every minute out there!",
@@ -118,7 +116,6 @@ async function getGameHistory(team: string): Promise<GameResponse> {
   return { team, source_url, retrieved_at, game, error: null };
 }
 function normalized(value: string): string { return clean(value).toUpperCase().replace("PERK VALLEY", "PERKIOMEN VALLEY").replace(/[^A-Z0-9]/g, ""); }
-async function getAllGames(team: string): Promise<Game[]> { const [html] = await fetchText(TEAM_URLS[team]); return html ? parseGameRows(team, html) : []; }
 async function pvGameToday(): Promise<boolean> {
   const [html] = await fetchText(TEAM_URLS["Perkiomen Valley"]); if (!html) return false;
   const $ = cheerio.load(html), target = "PERKIOMEN VALLEY", today = todayIso(); let found = false;
@@ -132,9 +129,6 @@ async function pvGameToday(): Promise<boolean> {
   }); return found;
 }
 function mickeyMessage(date: string): string { const index = [...date].reduce((total, character) => total + character.charCodeAt(0), 0) % MICKEY_ENCOURAGEMENT.length; return MICKEY_ENCOURAGEMENT[index]; }
-async function roundupCandidates(): Promise<string[]> { const found = new Set<string>(); for (let page = 1; page <= 3; page += 1) { const [html] = await fetchText(page === 1 ? ROUNDUP_INDEX_URL : `${ROUNDUP_INDEX_URL}page/${page}/`); if (!html) continue; const $ = cheerio.load(html); $("a[href]").each((_, link) => { const href = $(link).attr("href") ?? "", title = clean($(link).text()); if (/^https:\/\/www\.pottsmerc\.com\/\d{4}\/\d{2}\/\d{2}\//.test(href) && /roundup|soccer/i.test(title)) found.add(href); }); } return [...found].slice(0, 40); }
-function boysSoccerParagraphs(html: string): string[] { const $ = cheerio.load(html), paragraphs = $(".article-content-wrapper p").toArray(); const start = paragraphs.findIndex((paragraph) => clean($(paragraph).text()).toLowerCase() === "boys soccer"); if (start < 0) return []; const output: string[] = []; for (const paragraph of paragraphs.slice(start + 1)) { const text = clean($(paragraph).text()); if ($(paragraph).find("em").length && text) break; if (text) output.push(text); } return output; }
-async function roundup(): Promise<Roundup | null> { const games = await getAllGames("Perkiomen Valley"), latest = games.map((game) => game.date).sort().at(-1); const ledger = await readJson<{ delivered?: { game_key?: string }[] }>(FILES.roundup, {}), delivered = new Set((ledger.delivered ?? []).map((item) => item.game_key)); if (!latest) return null; for (const url of await roundupCandidates()) { const [html] = await fetchText(url); if (!html) continue; const paragraphs = boysSoccerParagraphs(html); for (const [index, line] of paragraphs.entries()) { const match = line.match(/^(.+?)\s+(\d+),\s*(.+?)\s+(\d+)$/); if (!match) continue; const [, left, leftScore, right, rightScore] = match; let opponent: string, teamScore: number, opponentScore: number; if (normalized(left) === normalized("Perkiomen Valley")) { opponent = clean(right); teamScore = Number(leftScore); opponentScore = Number(rightScore); } else if (normalized(right) === normalized("Perkiomen Valley")) { opponent = clean(left); teamScore = Number(rightScore); opponentScore = Number(leftScore); } else continue; const game = games.find((item) => normalized(item.opponent) === normalized(opponent) && item.team_score === teamScore && item.opponent_score === opponentScore); if (!game || game.date !== latest) continue; const game_key = `${game.date}|${normalized(game.opponent)}|${teamScore}|${opponentScore}`; if (!delivered.has(game_key)) return { game_key, url, game, recap: paragraphs[index + 1] ?? "" }; } } return null; }
 
 async function loadEnv(): Promise<void> { try { for (const line of (await readFile(`${BASE_DIR}/.env`, "utf8")).split("\n")) { if (line.startsWith("YOUTUBE_API_KEY=") && !process.env.YOUTUBE_API_KEY) process.env.YOUTUBE_API_KEY = line.slice(16).trim().replace(/^['"]|['"]$/g, ""); } } catch {} }
 async function videos(): Promise<{ title: string; url: string }[]> { const key = process.env.YOUTUBE_API_KEY; if (!key) return []; const out: { title: string; url: string }[] = [];
@@ -153,13 +147,12 @@ function gameSnapshot(games: GameResponse[]): Record<string, Game | null> { retu
 function sameJson(a: unknown, b: unknown): boolean { return JSON.stringify(a) === JSON.stringify(b); }
 function gameLine(team: string, _standing: Standing, response: GameResponse): string[] { if (response.error) return [`**${team}**`, "❓ Result unavailable"]; if (!response.game) return [`**${team}**`, "✨ No completed games"]; const game = response.game, symbol = game.outcome === "win" ? "✅" : game.outcome === "loss" ? "❌" : "🤝"; return [`**${team}**`, dateDisplay(game.date), `**${game.team_score}–${game.opponent_score} vs. ${game.opponent}** ${symbol}`]; }
 
-function report(standings: Awaited<ReturnType<typeof getStandings>>, games: GameResponse[], previous: Record<string, Pick<Standing, "classification" | "seed">>, newGames: boolean, roundupValue: Roundup | null, newsletterValue: Newsletter | null, quiet: boolean, videoList: { title: string; url: string }[], pvGameTodayValue: boolean): string {
+function report(standings: Awaited<ReturnType<typeof getStandings>>, games: GameResponse[], previous: Record<string, Pick<Standing, "classification" | "seed">>, newGames: boolean, newsletterValue: Newsletter | null, quiet: boolean, videoList: { title: string; url: string }[], pvGameTodayValue: boolean): string {
   const current = Object.fromEntries(standings.teams.map((team) => [team.team, team])), move = moves(current, previous), pv = current["Perkiomen Valley"], now = new Intl.DateTimeFormat("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric", timeZone: "America/New_York" }).format(new Date());
   const lines = ["⚽ **Perkiomen Valley Soccer Daily Update!** ⚽", `📅 **${now}**`, "", "💙 **PV Check-In**"];
-  if (quiet) { lines.push("📣 **No new PAC updates today—but the soccer focus stays strong!**", "The standings are unchanged, no new completed PAC games were recorded, and there’s no new Mercury PV recap to share. Team Together! ⚽"); if (pvGameTodayValue) lines.push("", "🎮 **Mickey’s Game-Day Boost**", mickeyMessage(todayIso())); if (videoList.length) lines.push("", "🎥 **Mickey’s Positioning Corner**", "No fresh scoreboard news means it’s a great day to sharpen the soccer IQ. Here are three optional positioning videos:", "", ...videoList.map((video, index) => `**${index + 1}.** [${video.title}](${video.url})`)); }
+  if (quiet) { lines.push("📣 **No new PAC updates today—but the soccer focus stays strong!**", "The standings are unchanged and no new completed PAC games were recorded. Team Together! ⚽"); if (pvGameTodayValue) lines.push("", "🎮 **Mickey’s Game-Day Boost**", mickeyMessage(todayIso())); if (videoList.length) lines.push("", "🎥 **Mickey’s Positioning Corner**", "No fresh scoreboard news means it’s a great day to sharpen the soccer IQ. Here are three optional positioning videos:", "", ...videoList.map((video, index) => `**${index + 1}.** [${video.title}](${video.url})`)); }
   else if (pv) lines.push(`Rank: **#${pv.seed}/${pv.classification}** ${move[pv.team]}`, `Record: **${pv.wins}-${pv.losses}-${pv.ties}**`, "", newGames ? "PV is on the move with a verified result in its latest action! 💪" : "No new completed PAC games have been recorded since the last full game summary, so this update is all about the standings. 🛡️", ...(pvGameTodayValue ? ["", "🎮 **Mickey’s Game-Day Boost**", mickeyMessage(todayIso())] : []));
   const rankingHighlights = highlights(current, previous); if (rankingHighlights.length) lines.push("", ...rankingHighlights);
-  if (roundupValue) { const game = roundupValue.game, result = game.team_score > game.opponent_score ? "win" : game.team_score < game.opponent_score ? "loss" : "tie"; lines.push("", "📰 **PV Roundup Spotlight**", `The Mercury’s Boys Soccer roundup checked in on PV’s ${dateDisplay(game.date)} ${result}: **${game.team_score}–${game.opponent_score} vs. ${game.opponent}**.`); if (roundupValue.recap) lines.push("", roundupValue.recap); lines.push("", `⚽ Want more PAC scores and local high-school action? [Catch the full Mercury roundup](${roundupValue.url})!`); }
   if (newsletterValue) lines.push("", "📬 **From the Athletic Director’s Newsletter**", ...formatNewsletter(newsletterValue.notes));
   lines.push("", "🔥 **Today’s PAC Pulse**", rankingHighlights.length ? "The PAC board has fresh movement to watch—every Seed change above is verified from today’s standings." : "12 PAC sides held their position.", "", "🛡️ **PAC Division Watch**", "");
   for (const [division, teams] of Object.entries(PAC_DIVISIONS)) { lines.push(`**${division}**`, ""); const groups = division === "Frontier Division" ? [["4A", teams.filter((team) => current[team]?.classification === "4A")], ["3A", teams.filter((team) => current[team]?.classification === "3A")]] : [["", teams]]; for (const [name, group] of groups) { if (name) lines.push(`*${name} Rankings*`, ""); for (const team of [...group].sort((a, b) => current[a].seed - current[b].seed || a.localeCompare(b))) { const item = current[team]; lines.push(`**${team}**`, `#${item.seed}/${item.classification} ${compactMovementLabel(move[team])} · ${item.wins}-${item.losses}-${item.ties}`); } lines.push(""); } }
@@ -170,16 +163,15 @@ async function main(): Promise<void> {
   await loadEnv(); const priorCurrent = await readJson<{ teams?: Standing[] }>(FILES.current, {}), priorMap = priorCurrent.teams?.length === 12 ? Object.fromEntries(priorCurrent.teams.map((team) => [team.team, team])) : null;
   const standings = await getStandings(); await writeJson(FILES.current, standings); const previous = (await readJson<{ teams?: Record<string, Pick<Standing, "classification" | "seed">> }>(FILES.previous, {})).teams ?? {};
   const games = await Promise.all(ALL_TEAMS.map(getGameHistory)); await writeJson(FILES.games, games); const last = await readJson<{ games?: Record<string, Game | null> }>(FILES.summary, {}); const newGames = games.some((game) => game.error) || !last.games || !sameJson(gameSnapshot(games), last.games);
-  const roundupValue = await roundup(), pvGameTodayValue = await pvGameToday();
+  const pvGameTodayValue = await pvGameToday();
   const newsletterValue = await newsletter(), newsletterState = await readJson<{ message_id?: string }>(FILES.newsletter, {}), newsletterNew = !!newsletterValue && newsletterValue.message_id !== newsletterState.message_id;
   const currentMap = Object.fromEntries(standings.teams.map((item) => [item.team, item]));
   const standingFields: (keyof Standing)[] = ["classification", "seed", "wins", "losses", "ties"];
   const standingChanged = !priorMap || ALL_TEAMS.some((team) => standingFields.some((field) => currentValue(priorMap[team], field) !== currentValue(currentMap[team], field)));
-  const quiet = validStandings(standings) && games.every((game) => !game.error) && !standingChanged && !newGames && !roundupValue && !newsletterNew; console.log(report(standings, games, previous, newGames, roundupValue, newsletterNew ? newsletterValue : null, quiet, quiet ? await videos() : [], pvGameTodayValue));
+  const quiet = validStandings(standings) && games.every((game) => !game.error) && !standingChanged && !newGames && !newsletterNew; console.log(report(standings, games, previous, newGames, newsletterNew ? newsletterValue : null, quiet, quiet ? await videos() : [], pvGameTodayValue));
   if (newGames && games.every((game) => !game.error)) await writeJson(FILES.summary, { summary_date: todayIso(), games: gameSnapshot(games) });
   if (validStandings(standings)) await writeJson(FILES.previous, { snapshot_date: todayIso(), source_url: STANDINGS_URL, teams: Object.fromEntries(standings.teams.map((team) => [team.team, { classification: team.classification, seed: team.seed }])) });
   if (newsletterValue) await writeJson(FILES.newsletter, { message_id: newsletterValue.message_id, retrieved_at: nowIso() });
-  if (roundupValue) { const ledger = await readJson<{ delivered?: unknown[] }>(FILES.roundup, {}); await writeJson(FILES.roundup, { delivered: [...(ledger.delivered ?? []), { game_key: roundupValue.game_key, article_url: roundupValue.url, delivered_at: nowIso() }] }); }
 }
 function currentValue(value: Standing | undefined, field: keyof Standing): unknown { return value?.[field]; }
 main().catch((error: unknown) => { console.error(error instanceof Error ? error.stack : error); process.exitCode = 1; });
