@@ -6,7 +6,8 @@
   "scripts": {
     "build": "tsc",
     "report": "node dist/report-generator.js",
-    "mercury": "node dist/mercury-watcher.js"
+    "mercury": "node dist/mercury-watcher.js",
+    "pac-standings": "node dist/pac-standings.js"
   },
   "dependencies": {
     "cheerio": "^1.1.2"
