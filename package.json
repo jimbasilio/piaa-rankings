@@ -7,7 +7,8 @@
     "build": "tsc",
     "report": "node dist/report-generator.js",
     "mercury": "node dist/mercury-watcher.js",
-    "pac-standings": "node dist/pac-standings.js"
+    "pac-standings": "node dist/pac-standings.js",
+    "power-rankings": "node dist/pac-power-rankings.js"
   },
   "dependencies": {
     "cheerio": "^1.1.2"
