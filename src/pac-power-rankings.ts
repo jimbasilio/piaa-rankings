@@ -367,9 +367,15 @@ function normalizedRatings(teams: TeamPower[], value: (team: TeamPower) => numbe
 }
 
 function movement(currentRank: number, previousRank?: number): string {
-  if (!previousRank) return "🆕";
+  if (!previousRank) return "🆕—";
   const delta = previousRank - currentRank;
   return delta > 0 ? `🟢▲ ${delta}` : delta < 0 ? `🔴▼ ${Math.abs(delta)}` : "⚪—";
+}
+
+function compactMovement(currentRank: number, previousRank?: number): string {
+  if (!previousRank) return "🆕—";
+  const delta = previousRank - currentRank;
+  return delta > 0 ? `🟢▲${delta}` : delta < 0 ? `🔴▼${Math.abs(delta)}` : "⚪—";
 }
 
 function pickPhrase(key: string, choices: string[]): string {
@@ -517,6 +523,7 @@ function render(
   const offenseRatings = normalizedRatings(teams, (team) => team.adjustedAttack);
   const defenseRatings = normalizedRatings(teams, (team) => team.adjustedDefense);
   const priorRanks = previous.teams ?? {};
+  const teamColumnWidth = Math.max("TEAM".length, ...ranked.map((team) => team.team.length));
   const lines = [
     "⚡ **Unofficial PAC Power Rankings**",
     `📅 **${new Intl.DateTimeFormat("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric", timeZone: "America/New_York" }).format(new Date())}**`,
@@ -527,13 +534,13 @@ function render(
     "*Attack and defense ratings are opponent-adjusted, scored 25–100 within the PAC; higher is better.*",
     "",
     "```text",
-    `RK ${"TEAM".padEnd(17)} ${"PWR".padStart(4)} REC`,
+    `RK ${"TEAM".padEnd(teamColumnWidth)} ${"PWR.".padStart(4)}`,
   ];
 
   ranked.forEach((team, index) => {
     const rank = index + 1;
-    const move = movement(rank, priorRanks[team.team]?.rank).replace("🆕", "NEW").replace("⚪—", "—").replace(/🟢▲ |🔴▼ /, "");
-    lines.push(`${String(rank).padStart(2)} ${team.team.padEnd(17)} ${team.score.toFixed(1).padStart(4)} ${recordString(team.record)}`.slice(0, 31) + (move === "—" ? "" : ` ${move}`));
+    const move = compactMovement(rank, priorRanks[team.team]?.rank);
+    lines.push(`${String(rank).padStart(2)} ${team.team.padEnd(teamColumnWidth)} ${team.score.toFixed(1).padStart(4)}${move}`);
   });
   lines.push("```", "", "📊 **Rankings Breakdown**", "");
 
