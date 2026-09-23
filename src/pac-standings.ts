@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 /**
  * Calculate unofficial PAC boys-soccer standings from completed PIAA games.
- * Mercury Boys Soccer roundups are used only to cross-check reported records.
  */
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import * as cheerio from "cheerio";
 
 const PIAA_BASE = "https://www.piaad1.org/sports/fall-sports/soccer-b/scores-and-rankings/games";
-const MERCURY_INDEX = "https://www.pottsmerc.com/sports/high-school-sports/";
 const HEADERS = { "User-Agent": "PAC-Soccer-Standings/1.0 (+local cron job)" };
+const STATE_FILE = "/home/jim/projects/piaa-rankings/data/pac-soccer/pac-standings-state.json";
 
 const PAC_TEAMS = [
   "Boyertown", "Methacton", "Norristown", "Owen J. Roberts", "Perkiomen Valley", "Spring-Ford",
@@ -21,25 +21,18 @@ const DIVISIONS: Record<string, readonly Team[]> = {
   Frontier: ["Phoenixville", "Pope John Paul II", "Pottsgrove", "Pottstown", "Upper Merion", "Upper Perkiomen"],
 };
 const TEAM_TO_DIVISION = new Map(PAC_TEAMS.map((team) => [team, Object.entries(DIVISIONS).find(([, teams]) => teams.includes(team))?.[0]! ]));
-const TEAM_ALIASES: Record<Team, string[]> = {
-  "Boyertown": ["Boyertown", "Bears"],
-  "Methacton": ["Methacton", "Warriors"],
-  "Norristown": ["Norristown", "Eagles"],
-  "Owen J. Roberts": ["Owen J. Roberts", "OJR", "Wildcats"],
-  "Perkiomen Valley": ["Perkiomen Valley", "Perk Valley", "PV", "Vikings"],
-  "Spring-Ford": ["Spring-Ford", "Rams"],
-  "Phoenixville": ["Phoenixville", "Phantoms"],
-  "Pope John Paul II": ["Pope John Paul II", "PJP", "Golden Panthers"],
-  "Pottsgrove": ["Pottsgrove", "Falcons"],
-  "Pottstown": ["Pottstown", "Trojans"],
-  "Upper Merion": ["Upper Merion", "UM", "Vikings"],
-  "Upper Perkiomen": ["Upper Perkiomen", "Indians"],
-};
-
 type WltRecord = { wins: number; losses: number; ties: number };
 type Game = { date: string; opponent: string; teamScore: number; opponentScore: number };
-type TeamSummary = { team: Team; division: string; overall: WltRecord; pac: WltRecord; divisionRecord: WltRecord; points: number };
-type MercurySnapshot = { overall: WltRecord; pac: WltRecord; articleUrl: string };
+type TeamSummary = {
+  team: Team;
+  division: string;
+  overall: WltRecord;
+  pac: WltRecord;
+  divisionRecord: WltRecord;
+  points: number;
+  divisionPoints: number;
+};
+type StandingsState = { snapshot: string };
 
 function clean(value: string): string {
   return value.replace(/\s+/g, " ").trim();
@@ -86,35 +79,6 @@ function recordString(record: WltRecord): string {
   return `${record.wins}-${record.losses}-${record.ties}`;
 }
 
-function parseRecord(value: string): WltRecord | null {
-  const match = value.match(/^(\d+)-(\d+)(?:-(\d+))?$/);
-  return match ? { wins: Number(match[1]), losses: Number(match[2]), ties: Number(match[3] ?? 0) } : null;
-}
-
-function sameRecord(left: WltRecord, right: WltRecord): boolean {
-  return left.wins === right.wins && left.losses === right.losses && left.ties === right.ties;
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function namedMercuryRecord(text: string, team: Team): { overall: WltRecord; pac: WltRecord } | null {
-  const names = TEAM_ALIASES[team].map(escapeRegExp).join("|");
-  const match = text.match(new RegExp(`(?:${names})\\s*\\((\\d+-\\d+(?:-\\d+)?),\\s*(\\d+-\\d+(?:-\\d+)?)\\s+PAC\\)`, "i"));
-  const overall = match ? parseRecord(match[1]) : null;
-  const pac = match ? parseRecord(match[2]) : null;
-  return overall && pac ? { overall, pac } : null;
-}
-
-function proseMercuryRecord(text: string, team: Team): { overall: WltRecord; pac: WltRecord } | null {
-  const names = TEAM_ALIASES[team].map(escapeRegExp).join("|");
-  const match = text.match(new RegExp(`(?:${names})\\s+(?:fell to|is now|now stands at|dropped to)\\s+(\\d+-\\d+(?:-\\d+)?)\\s+(?:and|,)\\s*(\\d+-\\d+(?:-\\d+)?)`, "i"));
-  const overall = match ? parseRecord(match[1]) : null;
-  const pac = match ? parseRecord(match[2]) : null;
-  return overall && pac ? { overall, pac } : null;
-}
-
 function addGame(record: WltRecord, game: Game): void {
   if (game.teamScore > game.opponentScore) record.wins += 1;
   else if (game.teamScore < game.opponentScore) record.losses += 1;
@@ -127,6 +91,15 @@ function points(record: WltRecord): number {
 
 function standingKey(row: TeamSummary): string {
   return [row.points, row.pac.wins, row.pac.losses, row.pac.ties].join("|");
+}
+
+function divisionStandingKey(row: TeamSummary): string {
+  return [
+    row.divisionPoints,
+    row.divisionRecord.wins,
+    row.divisionRecord.losses,
+    row.divisionRecord.ties,
+  ].join("|");
 }
 
 function parseGames(team: Team, html: string): Game[] {
@@ -187,113 +160,172 @@ function calculateStandings(histories: Map<Team, Game[]>): TeamSummary[] {
       if (TEAM_TO_DIVISION.get(opponent) === division) addGame(divisionRecord, game);
     }
 
-    return { team, division, overall, pac, divisionRecord, points: points(pac) };
+    return {
+      team,
+      division,
+      overall,
+      pac,
+      divisionRecord,
+      points: points(pac),
+      divisionPoints: points(divisionRecord),
+    };
   });
 }
 
-function boysSoccerParagraphs(html: string): string[] {
-  const $ = cheerio.load(html);
-  const paragraphs = $(".article-content-wrapper p").toArray();
-  const start = paragraphs.findIndex((paragraph) => clean($(paragraph).text()).toLowerCase() === "boys soccer");
-  if (start < 0) return [];
-
-  const output: string[] = [];
-  for (const paragraph of paragraphs.slice(start + 1)) {
-    const text = clean($(paragraph).text());
-    if ($(paragraph).find("em").length && text) break;
-    if (text) output.push(text);
-  }
-  return output;
+function standingsSnapshot(standings: TeamSummary[]): string {
+  return JSON.stringify(
+    standings
+      .map((row) => ({
+        team: row.team,
+        division: recordString(row.divisionRecord),
+        pac: recordString(row.pac),
+        overall: recordString(row.overall),
+      }))
+      .sort((left, right) => left.team.localeCompare(right.team)),
+  );
 }
 
-async function mercuryCandidates(): Promise<string[]> {
-  const found = new Set<string>();
-  for (let page = 1; page <= 3; page += 1) {
-    const html = await fetchText(page === 1 ? MERCURY_INDEX : `${MERCURY_INDEX}page/${page}/`);
-    if (!html) continue;
-    const $ = cheerio.load(html);
-    $("a[href]").each((_, link) => {
-      const url = $(link).attr("href") ?? "";
-      if (/^https:\/\/www\.pottsmerc\.com\/\d{4}\/\d{2}\/\d{2}\//.test(url) && /roundup|soccer/i.test(clean($(link).text()))) found.add(url);
-    });
+async function readState(): Promise<StandingsState | null> {
+  try {
+    return JSON.parse(await readFile(STATE_FILE, "utf8")) as StandingsState;
+  } catch {
+    return null;
   }
-  return [...found].sort((left, right) => right.localeCompare(left)).slice(0, 40);
 }
 
-async function mercurySnapshots(): Promise<Map<Team, MercurySnapshot>> {
-  const snapshots = new Map<Team, MercurySnapshot>();
-  for (const articleUrl of await mercuryCandidates()) {
-    const html = await fetchText(articleUrl);
-    if (!html) continue;
-
-    const paragraphs = boysSoccerParagraphs(html);
-    for (const [index, scoreline] of paragraphs.entries()) {
-      const score = scoreline.match(/^(.+?)\s+\d+,\s*(.+?)\s+\d+$/);
-      if (!score) continue;
-
-      const [firstTeam, secondTeam] = [pacTeam(score[1]), pacTeam(score[2])];
-      const recap = paragraphs[index + 1] ?? "";
-      const firstRecord = firstTeam ? namedMercuryRecord(recap, firstTeam) : null;
-      if (firstTeam && firstRecord && !snapshots.has(firstTeam)) snapshots.set(firstTeam, { ...firstRecord, articleUrl });
-
-      // Mercury sometimes writes the second team's record as prose, e.g.
-      // "Pottstown fell to 1-8 and 0-6." The scoreline establishes which team it describes.
-      const secondRecord = secondTeam ? namedMercuryRecord(recap, secondTeam) ?? proseMercuryRecord(recap, secondTeam) : null;
-      if (secondTeam && secondRecord && !snapshots.has(secondTeam)) {
-        snapshots.set(secondTeam, { ...secondRecord, articleUrl });
-      }
-    }
-  }
-  return snapshots;
+async function writeState(snapshot: string): Promise<void> {
+  await mkdir(new URL(".", `file://${STATE_FILE}`).pathname, { recursive: true });
+  await writeFile(STATE_FILE, JSON.stringify({ snapshot }), "utf8");
 }
 
-function render(standings: TeamSummary[], snapshots: Map<Team, MercurySnapshot>): string {
+function comparePacPoints(left: TeamSummary, right: TeamSummary): number {
+  return right.points - left.points || right.pac.wins - left.pac.wins || left.pac.losses - right.pac.losses || left.team.localeCompare(right.team);
+}
+
+function compareDivisionPoints(left: TeamSummary, right: TeamSummary): number {
+  return right.divisionPoints - left.divisionPoints || right.divisionRecord.wins - left.divisionRecord.wins || left.divisionRecord.losses - right.divisionRecord.losses || left.team.localeCompare(right.team);
+}
+
+function tiedOnDivisionPoints(rows: TeamSummary[]): boolean {
+  return rows.length > 1 && rows[0].divisionPoints === rows[1].divisionPoints;
+}
+
+function render(standings: TeamSummary[]): string {
   const lines = [
     "🏆 **Unofficial PAC Boys Soccer Standings**",
     "",
     "Points: 3 for a PAC win · 1 for a PAC tie · 0 for a loss",
-    "Calculated from completed PIAA game histories; Mercury records are a cross-check.",
-    "**ST:** Q = projected playoff spot · T = tie at the playoff cutoff",
+    "Calculated from completed PIAA game histories.",
+    "",
+    "**How we believe the PAC Final Four works**",
+    "• The Liberty and Frontier division champions receive automatic bids, based on division play.",
+    "• The next two spots are wild cards, based on PAC/conference points (including crossover games).",
+    "• Conference points likely order the four seeds, but the PAC has not published its current tie-break procedure.",
   ];
 
-  for (const [division, teams] of Object.entries(DIVISIONS)) {
-    const rows = standings
-      .filter((entry) => entry.division === division)
-      .sort((left, right) => right.points - left.points || right.pac.wins - left.pac.wins || left.pac.losses - right.pac.losses || left.team.localeCompare(right.team));
+  const divisionChampions: TeamSummary[] = [];
+  const divisionRaces = new Map<string, TeamSummary[]>();
 
-    lines.push("", `**${division} Division**`, "```text", "RK TEAM                DIV    PAC    OVR    PTS ST");
-    const cutoffKey = standingKey(rows[1]);
-    const tiedAtCutoff = rows.filter((row) => standingKey(row) === cutoffKey).length > 1;
+  for (const [division, teams] of Object.entries(DIVISIONS)) {
+    const pacRows = standings
+      .filter((entry) => entry.division === division)
+      .sort(comparePacPoints);
+
+    // Division tables show the division-title race, so they must be ordered
+    // by division points—not conference points. PAC points remain visible for
+    // the separate wild-card comparison below.
+    const rows = [...pacRows].sort(compareDivisionPoints);
+    const divisionRace = rows;
+    divisionRaces.set(division, divisionRace);
+    const divisionLeader = divisionRace[0];
+    if (!tiedOnDivisionPoints(divisionRace)) divisionChampions.push(divisionLeader);
+
+    lines.push(
+      "",
+      `**${division} Division**`,
+      "*Division-title race — ordered by division points.*",
+      "```text",
+      `${"RK".padEnd(2)} ${"TEAM".padEnd(17)} ${"DIV".padEnd(5)} ${"DP".padStart(2)}`,
+    );
     let priorKey = "";
     let rank = 0;
 
     for (const [index, row] of rows.entries()) {
-      const key = standingKey(row);
+      const key = divisionStandingKey(row);
       if (key !== priorKey) rank = index + 1;
       priorKey = key;
-      const qualifier = rank < 2 ? "Q" : rank === 2 && tiedAtCutoff ? "T" : rank === 2 ? "Q" : "";
-      const rankLabel = rank === 2 && tiedAtCutoff ? "2T" : String(rank);
-      lines.push(`${rankLabel.padEnd(2)} ${row.team.padEnd(19)} ${recordString(row.divisionRecord).padEnd(6)} ${recordString(row.pac).padEnd(6)} ${recordString(row.overall).padEnd(6)} ${String(row.points).padStart(3)} ${qualifier}`);
+      const tied = rows.filter((candidate) => divisionStandingKey(candidate) === key).length > 1;
+      const rankLabel = `${rank}${tied ? "T" : ""}`;
+      // This fixed-width row is deliberately capped at 29 characters so it
+      // remains intact in narrow WhatsApp chat windows.
+      lines.push(`${rankLabel.padEnd(2)} ${row.team.padEnd(17)} ${recordString(row.divisionRecord)} ${String(row.divisionPoints).padStart(2)}`);
     }
     lines.push("```");
-    if (tiedAtCutoff) lines.push("⚠️ PAC tie-breaker needed to resolve the playoff cutoff.");
+    if (tiedOnDivisionPoints(divisionRace)) {
+      lines.push(`⚠️ **Division title race:** ${divisionRace[0].team} and ${divisionRace[1].team} are tied on division points; official PAC tie-breaker needed.`);
+    } else {
+      lines.push(`🏁 **Division leader:** ${divisionLeader.team} — ${recordString(divisionLeader.divisionRecord)} in division play (${divisionLeader.divisionPoints} points).`);
+    }
+
+    lines.push("", `**${division} Details**`);
+    for (const row of rows) {
+      lines.push(`• ${row.team}`, `  PAC ${recordString(row.pac)} (${row.points} pts)`, `  Overall ${recordString(row.overall)}`);
+    }
   }
 
-  const confirmations = standings.flatMap((row) => {
-    const snapshot = snapshots.get(row.team);
-    if (!snapshot) return [];
-    const valid = sameRecord(row.overall, snapshot.overall) && sameRecord(row.pac, snapshot.pac);
-    return [`${valid ? "✅" : "⚠️"} ${row.team}: Mercury ${recordString(snapshot.overall)} overall / ${recordString(snapshot.pac)} PAC${valid ? " matches PIAA." : " differs from PIAA."}`];
-  });
+  const unresolvedDivisionRaces = [...divisionRaces.entries()].filter(([, rows]) => tiedOnDivisionPoints(rows));
+  lines.push("", "🎟️ **PAC Final Four Watch — Unofficial**");
 
-  if (confirmations.length) lines.push("", "📰 **Mercury Record Cross-Checks**", ...confirmations);
-  lines.push("", "*Unverified or prose-only Mercury records are intentionally omitted from the cross-check rather than guessed.*");
+  if (unresolvedDivisionRaces.length) {
+    lines.push("The projected field is intentionally **not** named yet: a division championship is tied, and that result changes the wild-card pool.");
+    for (const [division, rows] of unresolvedDivisionRaces) {
+      lines.push(`• **${division} title race:** ${rows[0].team} and ${rows[1].team} are tied on division points.`);
+    }
+    lines.push("", "**PAC-points wild-card watch**");
+    lines.push("These are the conference-points leaders, but they are not labeled wild cards until the division title race is resolved:");
+    standings.sort(comparePacPoints).slice(0, 4).forEach((team) => {
+      lines.push(`• **${team.team}** — ${recordString(team.pac)} PAC (${team.points} points)`);
+    });
+  } else {
+    const divisionLeaderNames = new Set(divisionChampions.map((row) => row.team));
+    const wildCardPool = standings.filter((row) => !divisionLeaderNames.has(row.team)).sort(comparePacPoints);
+    const wildCards = wildCardPool.slice(0, 2);
+    const projectedFinalFour = [...divisionChampions, ...wildCards].sort(comparePacPoints);
+
+    for (const champion of divisionChampions.sort((left, right) => left.division.localeCompare(right.division))) {
+      lines.push(`• **${champion.team}** — ${champion.division} leader; automatic-bid projection.`);
+    }
+    for (const wildCard of wildCards) {
+      lines.push(`• **${wildCard.team}** — wild-card projection; ${recordString(wildCard.pac)} PAC (${wildCard.points} points).`);
+    }
+    lines.push("", "**Provisional seed order by PAC points**");
+    projectedFinalFour.forEach((team, index) => lines.push(`${index + 1}. ${team.team} — ${team.points} PAC points`));
+    if (wildCardPool.length > 2 && wildCardPool[1].points === wildCardPool[2].points) {
+      lines.push("⚠️ The final wild-card line is tied on PAC points; official PAC tie-breaker needed.");
+    }
+  }
+
   return lines.join("\n");
 }
 
 async function main(): Promise<void> {
   const standings = calculateStandings(await loadOfficialGames());
-  console.log(render(standings, await mercurySnapshots()));
+  const snapshot = standingsSnapshot(standings);
+  const mode = process.argv[2];
+
+  if (mode === "--mark-sent") {
+    await writeState(snapshot);
+    return;
+  }
+
+  if (mode === "--send-if-changed") {
+    if ((await readState())?.snapshot === snapshot) return;
+    // The automation suppresses empty output. Update the ledger only when a
+    // changed report is about to be emitted for delivery.
+    await writeState(snapshot);
+  }
+
+  console.log(render(standings));
 }
 
 main().catch((error: unknown) => {
