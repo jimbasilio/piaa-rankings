@@ -438,8 +438,16 @@ function projectedScore(
     const opponentAttack = opponentGoals.for / opponentPlayed;
     const opponentDefense = opponentGoals.against / opponentPlayed;
     const advantage = (team.score - pacOpponent.score) / 100 + (next.home ? 0.04 : -0.04);
-    const expectedFor = Math.min(5, Math.max(0, 1.45 + advantage * 2.2 + (teamAttack - opponentDefense) * 0.18));
-    const expectedAgainst = Math.min(5, Math.max(0, 1.45 - advantage * 2.2 + (opponentAttack - teamDefense) * 0.18));
+    // Goals allowed are a defensive vulnerability, so a higher value raises
+    // the opponent's expected scoring. Keeping both sides of the calculation
+    // symmetric guarantees the same matchup is projected identically from
+    // either team's report entry.
+    const expectedFor = Math.min(5, Math.max(0,
+      1.45 + advantage * 2.2 + (teamAttack - 1.45) * 0.28 + (opponentDefense - 1.45) * 0.28,
+    ));
+    const expectedAgainst = Math.min(5, Math.max(0,
+      1.45 - advantage * 2.2 + (opponentAttack - 1.45) * 0.28 + (teamDefense - 1.45) * 0.28,
+    ));
     let teamScore = Math.round(expectedFor);
     let opponentScore = Math.round(expectedAgainst);
     if (teamScore === opponentScore && Math.abs(advantage) >= 0.12) {
