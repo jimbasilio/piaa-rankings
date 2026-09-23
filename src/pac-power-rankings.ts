@@ -50,7 +50,11 @@ type TeamPower = {
 };
 type NetworkGame = { team: string; opponent: string; teamScore: number; opponentScore: number };
 type NetworkRating = { attack: number; defense: number; games: number };
-type PriorState = { modelVersion?: string; teams?: Record<string, { rank: number; score: number }> };
+type PriorState = {
+  modelVersion?: string;
+  gameSnapshot?: string;
+  teams?: Record<string, { rank: number; score: number }>;
+};
 type D1ScheduleIndex = {
   source: string;
   refreshedAt: string;
@@ -488,7 +492,7 @@ function teamBlurb(
     "The model is rewarding the whole body of work here.",
     "Strength of schedule and opponent-adjusted scoring both matter in this slot.",
   ]);
-  const ratings = `⚽ **Network form:** Attack **${offenseRatings.get(team.team)}** · Defense **${defenseRatings.get(team.team)}**`;
+  const ratings = `⚽ **Strength Profile**\nAttack **${offenseRatings.get(team.team)}** · Defense **${defenseRatings.get(team.team)}**`;
   return `**#${rank} ${team.team}** — ${recordString(team.record)} overall · ${team.score.toFixed(1)} power points.${prior} ${profile}\n${ratings}\n${latestImpact(team, standings, classSizes)}${unmatched}\n${projectedScore(team, powerByTeam, standings, classSizes)}`;
 }
 
@@ -512,7 +516,7 @@ function render(
     "*A transparent strength ranking—not PAC playoff seeding.*",
     "**Formula:** 40% PIAA strength · 25% quality results · 15% schedule strength · 10% overall record · 10% adjusted offense/defense.",
     "*Matched D1 opponents are weighted by current PIAA placement and record; non-D1 opponents are excluded.*",
-    "*Network-form ratings are opponent-adjusted, scored 25–100 within the PAC; higher is better.*",
+    "*Attack and defense ratings are opponent-adjusted, scored 25–100 within the PAC; higher is better.*",
     "",
     "```text",
     `RK ${"TEAM".padEnd(17)} ${"PWR".padStart(4)} REC`,
@@ -523,7 +527,7 @@ function render(
     const move = movement(rank, priorRanks[team.team]?.rank).replace("🆕", "NEW").replace("⚪—", "—").replace(/🟢▲ |🔴▼ /, "");
     lines.push(`${String(rank).padStart(2)} ${team.team.padEnd(17)} ${team.score.toFixed(1).padStart(4)} ${recordString(team.record)}`.slice(0, 31) + (move === "—" ? "" : ` ${move}`));
   });
-  lines.push("```", "", "📊 **Why the order looks this way**", "");
+  lines.push("```", "", "📊 **Rankings Breakdown**", "");
 
   ranked.forEach((team, index) => lines.push(teamBlurb(team, index + 1, priorRanks[team.team]?.rank, powerByTeam, offenseRatings, defenseRatings, standings, classSizes), ""));
   lines.push(
@@ -542,9 +546,23 @@ async function readState(): Promise<PriorState> {
   }
 }
 
-async function writeState(ranked: TeamPower[]): Promise<void> {
+async function writeState(ranked: TeamPower[], gameSnapshot: string): Promise<void> {
   await mkdir(DATA_DIR, { recursive: true });
-  await writeFile(STATE_FILE, JSON.stringify({ modelVersion: MODEL_VERSION, generatedAt: new Date().toISOString(), teams: Object.fromEntries(ranked.map((team, index) => [team.team, { rank: index + 1, score: team.score }])) }, null, 2));
+  await writeFile(STATE_FILE, JSON.stringify({
+    modelVersion: MODEL_VERSION,
+    generatedAt: new Date().toISOString(),
+    gameSnapshot,
+    teams: Object.fromEntries(ranked.map((team, index) => [team.team, { rank: index + 1, score: team.score }])),
+  }, null, 2));
+}
+
+function completedGameSnapshot(schedules: readonly (readonly [PacTeam, TeamSchedule])[]): string {
+  return schedules
+    .flatMap(([team, schedule]) => schedule.completed.map((game) =>
+      `${team}|${game.date}|${normalized(game.opponent)}|${game.teamScore}-${game.opponentScore}`,
+    ))
+    .sort()
+    .join("\n");
 }
 
 /**
@@ -601,8 +619,12 @@ async function main(): Promise<void> {
   const ranked = rankTeams(teams);
   const loadedPrevious = await readState();
   const previous = loadedPrevious.modelVersion === MODEL_VERSION ? loadedPrevious : {};
+  const gameSnapshot = completedGameSnapshot(fetchedSchedules);
+  const preview = process.argv.includes("--preview");
+  const onlyIfChanged = process.argv.includes("--if-changed");
+  if (onlyIfChanged && previous.gameSnapshot === gameSnapshot) return;
   console.log(render(teams, previous, standingsByName, classSizes, externalOpponents.size, networkGames.length));
-  if (!process.argv.includes("--preview")) await writeState(ranked);
+  if (!preview) await writeState(ranked, gameSnapshot);
 }
 
 main().catch((error: unknown) => {
