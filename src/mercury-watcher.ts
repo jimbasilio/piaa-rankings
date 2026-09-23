@@ -150,7 +150,12 @@ async function roundupCandidates(): Promise<string[]> {
       if (isArticle && /roundup|soccer/i.test(title)) found.add(href);
     });
   }
-  return [...found].slice(0, 40);
+  // Keep page order for same-day stories, but never let a prior-day roundup
+  // leapfrog a newer one because of link/DOM order.
+  const publicationDate = (url: string) => url.match(/\/(\d{4})\/(\d{2})\/(\d{2})\//)?.slice(1).join("-") ?? "";
+  return [...found]
+    .sort((left, right) => publicationDate(right).localeCompare(publicationDate(left)))
+    .slice(0, 40);
 }
 
 function verifiedMatches(paragraphs: string[], histories: Map<string, Game[]>): VerifiedMatch[] {
@@ -206,18 +211,19 @@ async function main(): Promise<void> {
   const deliveredArticles = new Set(ledger.articles ?? []);
   const histories = await loadOfficialHistories();
 
-  for (const articleUrl of await roundupCandidates()) {
-    if (deliveredArticles.has(articleUrl)) continue;
-    const articleHtml = await fetchText(articleUrl);
-    if (!articleHtml) continue;
+  // This is a live alert, not a historical roundup backfill. Once the newest
+  // eligible article has been handled, an hourly run stays quiet until a newer
+  // Mercury story appears.
+  const [articleUrl] = await roundupCandidates();
+  if (!articleUrl || deliveredArticles.has(articleUrl)) return;
 
-    const matches = verifiedMatches(boysSoccerParagraphs(articleHtml), histories);
-    if (!matches.length) continue;
+  const articleHtml = await fetchText(articleUrl);
+  if (!articleHtml) return;
+  const matches = verifiedMatches(boysSoccerParagraphs(articleHtml), histories);
+  if (!matches.length) return;
 
-    console.log(renderAlert(articleUrl, matches));
-    await writeLedger(articleUrl, deliveredArticles);
-    return;
-  }
+  console.log(renderAlert(articleUrl, matches));
+  await writeLedger(articleUrl, deliveredArticles);
 }
 
 main().catch((error: unknown) => {
