@@ -116,6 +116,7 @@ async function getGameHistory(team: string): Promise<GameResponse> {
   return { team, source_url, retrieved_at, game, error: null };
 }
 function normalized(value: string): string { return clean(value).toUpperCase().replace("PERK VALLEY", "PERKIOMEN VALLEY").replace(/[^A-Z0-9]/g, ""); }
+function displayOpponent(value: string): string { return ALL_TEAMS.find((team) => normalized(team) === normalized(value)) ?? clean(value).toLowerCase().replace(/\b[a-z]/g, (letter) => letter.toUpperCase()); }
 async function pvGameToday(): Promise<boolean> {
   const [html] = await fetchText(TEAM_URLS["Perkiomen Valley"]); if (!html) return false;
   const $ = cheerio.load(html), target = "PERKIOMEN VALLEY", today = todayIso(); let found = false;
@@ -145,7 +146,7 @@ function highlights(current: Record<string, Standing>, previous: Record<string, 
 function validStandings(value: { error: string | null; teams: Standing[] }): boolean { return !value.error && value.teams.length === 12 && new Set(value.teams.map((team) => team.team)).size === 12; }
 function gameSnapshot(games: GameResponse[]): Record<string, Game | null> { return Object.fromEntries(games.map((item) => [item.team, item.game])); }
 function sameJson(a: unknown, b: unknown): boolean { return JSON.stringify(a) === JSON.stringify(b); }
-function gameLine(team: string, _standing: Standing, response: GameResponse): string[] { if (response.error) return [`**${team}**`, "❓ Result unavailable"]; if (!response.game) return [`**${team}**`, "✨ No completed games"]; const game = response.game, symbol = game.outcome === "win" ? "✅" : game.outcome === "loss" ? "❌" : "🤝"; return [`**${team}**`, dateDisplay(game.date), `**${game.team_score}–${game.opponent_score} vs. ${game.opponent}** ${symbol}`]; }
+function gameLine(team: string, _standing: Standing, response: GameResponse): string[] { if (response.error) return [`**${team}**`, "❓ Result unavailable"]; if (!response.game) return [`**${team}**`, "✨ No completed games"]; const game = response.game, symbol = game.outcome === "win" ? "✅" : game.outcome === "loss" ? "❌" : "🤝"; return [`**${team}**`, dateDisplay(game.date), `**${game.team_score}–${game.opponent_score} vs. ${displayOpponent(game.opponent)}** ${symbol}`]; }
 
 function report(standings: Awaited<ReturnType<typeof getStandings>>, games: GameResponse[], previous: Record<string, Pick<Standing, "classification" | "seed">>, newGames: boolean, newsletterValue: Newsletter | null, quiet: boolean, videoList: { title: string; url: string }[], pvGameTodayValue: boolean): string {
   const current = Object.fromEntries(standings.teams.map((team) => [team.team, team])), move = moves(current, previous), pv = current["Perkiomen Valley"], now = new Intl.DateTimeFormat("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric", timeZone: "America/New_York" }).format(new Date());
