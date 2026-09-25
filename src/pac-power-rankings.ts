@@ -424,6 +424,17 @@ function goalsForAndAgainst(games: Game[]): { for: number; against: number } {
   return games.reduce((total, game) => ({ for: total.for + game.teamScore, against: total.against + game.opponentScore }), { for: 0, against: 0 });
 }
 
+function predictionConfidence(
+  teamGames: number,
+  opponentGames: number,
+  knownOpponent: boolean,
+  strengthGap: number,
+): "high" | "moderate" | "low" {
+  if (!knownOpponent || teamGames < 4 || opponentGames < 4) return "low";
+  if (teamGames >= 6 && opponentGames >= 6 && Math.abs(strengthGap) >= 0.30) return "high";
+  return "moderate";
+}
+
 function projectedScore(
   team: TeamPower,
   powerByTeam: Map<string, TeamPower>,
@@ -461,7 +472,8 @@ function projectedScore(
       else opponentScore += 1;
     }
     const location = next.home ? "vs." : "at";
-    return `🔮 Next: ${displayDate(next.date)} ${location} ${properCase(next.opponent)} — projected ${teamScore}–${opponentScore} (moderate confidence).`;
+    const confidence = predictionConfidence(team.games.length, pacOpponent.games.length, true, advantage);
+    return `🔮 Next: ${displayDate(next.date)} ${location} ${properCase(next.opponent)} — projected ${teamScore}–${opponentScore} (${confidence} confidence).`;
   }
 
   const opponent = standings.get(normalized(next.opponent));
@@ -484,7 +496,9 @@ function projectedScore(
   }
 
   const location = next.home ? "vs." : "at";
-  const confidence = opponent ? "moderate" : "lower";
+  const confidence = predictionConfidence(team.games.length, opponent?.record
+    ? opponent.record.wins + opponent.record.losses + opponent.record.ties
+    : 0, !!opponent, advantage);
   return `🔮 Next: ${displayDate(next.date)} ${location} ${properCase(next.opponent)} — projected ${teamScore}–${opponentScore} (${confidence} confidence).`;
 }
 
