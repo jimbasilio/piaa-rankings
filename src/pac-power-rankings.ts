@@ -553,6 +553,17 @@ function render(
   return lines.join("\n").trim();
 }
 
+function renderParts(report: string): string[] {
+  const breakdown = "📊 **Rankings Breakdown**";
+  const start = report.indexOf(breakdown);
+  if (start < 0) return [report];
+  const body = report.slice(start);
+  const teamHeadings = [...body.matchAll(/\n(?=\*\*#\d+ )/g)].map((match) => match.index ?? 0);
+  const splitAt = teamHeadings.find((index) => /\*\*#7 /.test(body.slice(index + 1, index + 8)));
+  if (splitAt === undefined) return [report];
+  return [report.slice(0, start).trimEnd(), body.slice(0, splitAt).trim(), body.slice(splitAt).trim()];
+}
+
 async function readState(): Promise<PriorState> {
   try {
     return JSON.parse(await readFile(STATE_FILE, "utf8")) as PriorState;
@@ -642,7 +653,8 @@ async function main(): Promise<void> {
   const preview = process.argv.includes("--preview");
   const onlyIfChanged = process.argv.includes("--if-changed");
   if (onlyIfChanged && previous.gameSnapshot === gameSnapshot) return;
-  console.log(render(teams, previous, standingsByName, classSizes, externalOpponents.size, networkGames.length));
+  const report = render(teams, previous, standingsByName, classSizes, externalOpponents.size, networkGames.length);
+  console.log(process.argv.includes("--parts") ? JSON.stringify(renderParts(report)) : report);
   if (!preview) await writeState(ranked, gameSnapshot);
 }
 
