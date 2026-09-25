@@ -29,7 +29,7 @@ const HEADLINES = [
 
 type Game = { date: string; opponent: string; teamScore: number; opponentScore: number };
 type VerifiedMatch = { team: string; game: Game; recap: string };
-type Ledger = { articles?: string[]; delivered_at?: string };
+type Ledger = { articles?: string[]; checked_articles?: string[]; last_checked_date?: string; delivered_at?: string };
 
 function clean(value: string): string {
   return value.replace(/\s+/g, " ").trim();
@@ -79,12 +79,16 @@ async function readLedger(): Promise<Ledger> {
   }
 }
 
-async function writeLedger(articleUrl: string, priorArticles: Set<string>): Promise<void> {
+async function writeLedger(ledger: Ledger): Promise<void> {
   await mkdir(DATA_DIR, { recursive: true });
   await writeFile(LEDGER_PATH, JSON.stringify({
-    articles: [...priorArticles, articleUrl],
+    ...ledger,
     delivered_at: new Date().toISOString(),
   }), "utf8");
+}
+
+function articleDate(url: string): string {
+  return url.match(/\/(\d{4})\/(\d{2})\/(\d{2})\//)?.slice(1).join("-") ?? "";
 }
 
 function parseGameHistory(team: string, html: string): Game[] {
@@ -209,21 +213,48 @@ function renderAlert(articleUrl: string, matches: VerifiedMatch[]): string {
 async function main(): Promise<void> {
   const ledger = await readLedger();
   const deliveredArticles = new Set(ledger.articles ?? []);
+  const checkedArticles = new Set(ledger.checked_articles ?? []);
   const histories = await loadOfficialHistories();
 
-  // This is a live alert, not a historical roundup backfill. Once the newest
-  // eligible article has been handled, an hourly run stays quiet until a newer
-  // Mercury story appears.
-  const [articleUrl] = await roundupCandidates();
-  if (!articleUrl || deliveredArticles.has(articleUrl)) return;
+  // This is a live alert, not a historical roundup backfill. Only inspect
+  // articles on or after the newest date already checked. This still scans
+  // every article published on that date, since several stories can arrive
+  // on the same day and only some may contain a Boys Soccer section.
+  const candidates = await roundupCandidates();
+  const boundary = ledger.last_checked_date
+    ?? [...deliveredArticles].map(articleDate).filter(Boolean).sort().at(-1)
+    ?? "";
+  let newestCheckedDate = boundary;
 
-  const articleHtml = await fetchText(articleUrl);
-  if (!articleHtml) return;
-  const matches = verifiedMatches(boysSoccerParagraphs(articleHtml), histories);
-  if (!matches.length) return;
+  for (const articleUrl of candidates) {
+    const date = articleDate(articleUrl);
+    if (!date || (boundary && date < boundary) || checkedArticles.has(articleUrl)) continue;
+    if (date > newestCheckedDate) newestCheckedDate = date;
 
-  console.log(renderAlert(articleUrl, matches));
-  await writeLedger(articleUrl, deliveredArticles);
+    const articleHtml = await fetchText(articleUrl);
+    checkedArticles.add(articleUrl);
+    if (!articleHtml) continue;
+
+    const matches = verifiedMatches(boysSoccerParagraphs(articleHtml), histories);
+    if (!matches.length) continue;
+
+    console.log(renderAlert(articleUrl, matches));
+    deliveredArticles.add(articleUrl);
+    await writeLedger({
+      articles: [...deliveredArticles],
+      checked_articles: [...checkedArticles],
+      last_checked_date: newestCheckedDate,
+    });
+    return;
+  }
+
+  if (newestCheckedDate !== boundary || checkedArticles.size !== (ledger.checked_articles ?? []).length) {
+    await writeLedger({
+      articles: [...deliveredArticles],
+      checked_articles: [...checkedArticles],
+      last_checked_date: newestCheckedDate,
+    });
+  }
 }
 
 main().catch((error: unknown) => {
