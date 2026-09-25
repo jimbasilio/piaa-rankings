@@ -170,13 +170,18 @@ function verifiedMatches(paragraphs: string[], histories: Map<string, Game[]>): 
     if (!score) continue;
 
     const [, firstTeam, firstScore, secondTeam, secondScore] = score;
-    // The first-listed Mercury team owns the recap, avoiding PAC-vs-PAC duplicates.
-    const team = PAC_TEAMS.find((candidate) => normalized(candidate) === normalized(firstTeam));
+    // Prefer PV when it is listed second so the report's featured PV section
+    // is still populated. For all other PAC-vs-PAC games, the first-listed
+    // PAC team owns the recap to avoid duplicate entries.
+    const team = normalized(secondTeam) === normalized("Perkiomen Valley")
+      ? "Perkiomen Valley"
+      : PAC_TEAMS.find((candidate) => normalized(candidate) === normalized(firstTeam));
     if (!team) continue;
+    const teamIsFirst = normalized(team) === normalized(firstTeam);
     const game = histories.get(team)?.find((candidate) =>
-      normalized(candidate.opponent) === normalized(secondTeam) &&
-      candidate.teamScore === Number(firstScore) &&
-      candidate.opponentScore === Number(secondScore));
+      normalized(candidate.opponent) === normalized(teamIsFirst ? secondTeam : firstTeam) &&
+      candidate.teamScore === Number(teamIsFirst ? firstScore : secondScore) &&
+      candidate.opponentScore === Number(teamIsFirst ? secondScore : firstScore));
     if (!game) continue;
 
     const key = `${team}|${game.date}|${game.teamScore}|${game.opponentScore}|${normalized(game.opponent)}`;
