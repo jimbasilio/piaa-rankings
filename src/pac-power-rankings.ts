@@ -514,14 +514,8 @@ function teamBlurb(
 ): string {
   const prior = previousRank ? ` ${movement(rank, previousRank)} from #${previousRank}.` : " This is the first baseline.";
   const unmatched = team.unmatchedOpponents.length ? ` ${team.unmatchedOpponents.length} non-D1/unmatched opponent${team.unmatchedOpponents.length === 1 ? " is" : "s are"} excluded from opponent-strength scoring.` : "";
-  const profile = pickPhrase(team.team, [
-    "The full D1 network—not just the win total—sets this number.",
-    "This spot reflects the résumé, schedule, and opponent-adjusted goal profile.",
-    "The model is rewarding the whole body of work here.",
-    "Strength of schedule and opponent-adjusted scoring both matter in this slot.",
-  ]);
   const ratings = `⚽ **Strength Profile**\nAttack **${offenseRatings.get(team.team)}** · Defense **${defenseRatings.get(team.team)}**`;
-  return `**#${rank} ${team.team}** — ${recordString(team.record)} overall · ${team.score.toFixed(1)} power points.${prior} ${profile}\n${ratings}\n${latestImpact(team, standings, classSizes)}${unmatched}\n${projectedScore(team, powerByTeam, standings, classSizes)}`;
+  return `**#${rank} ${team.team}** — ${recordString(team.record)} overall · ${team.score.toFixed(1)} power points.${prior}\n${ratings}\n${latestImpact(team, standings, classSizes)}${unmatched}\n${projectedScore(team, powerByTeam, standings, classSizes)}`;
 }
 
 function render(
