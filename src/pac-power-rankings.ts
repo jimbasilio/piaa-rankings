@@ -612,7 +612,11 @@ async function main(): Promise<void> {
   const externalOpponents = new Map<string, PIAAStanding>();
 
   for (const [, schedule] of fetchedSchedules) {
-    for (const game of schedule.completed) {
+    // Include both completed and upcoming non-PAC D1 opponents.  The live
+    // standings page exposes the same calendar links used for completed
+    // opponents, so known future opponents can contribute their current
+    // schedule/record context to the network and projections.
+    for (const game of [...schedule.completed, ...schedule.upcoming]) {
       const opponent = standingsByName.get(normalized(game.opponent));
       if (opponent && !PAC_TEAMS.some((team) => normalized(team) === normalized(opponent.school))) {
         externalOpponents.set(normalized(opponent.school), opponent);
