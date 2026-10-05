@@ -20,6 +20,12 @@ const DIVISIONS: Record<string, readonly Team[]> = {
   Liberty: ["Boyertown", "Methacton", "Norristown", "Owen J. Roberts", "Perkiomen Valley", "Spring-Ford"],
   Frontier: ["Phoenixville", "Pope John Paul II", "Pottsgrove", "Pottstown", "Upper Merion", "Upper Perkiomen"],
 };
+const GRID_TEAM_LABELS: Partial<Record<Team, string>> = {
+  "Owen J. Roberts": "OJR",
+  "Perkiomen Valley": "PV",
+  "Pope John Paul II": "PJP",
+  "Upper Perkiomen": "Upper Perk",
+};
 const TEAM_TO_DIVISION = new Map(PAC_TEAMS.map((team) => [team, Object.entries(DIVISIONS).find(([, teams]) => teams.includes(team))?.[0]! ]));
 type WltRecord = { wins: number; losses: number; ties: number };
 type Game = { date: string; opponent: string; teamScore: number; opponentScore: number };
@@ -77,6 +83,10 @@ function emptyRecord(): WltRecord {
 
 function recordString(record: WltRecord): string {
   return `${record.wins}-${record.losses}-${record.ties}`;
+}
+
+function gridTeamName(team: Team): string {
+  return GRID_TEAM_LABELS[team] ?? team;
 }
 
 function addGame(record: WltRecord, game: Game): void {
@@ -245,7 +255,7 @@ function render(standings: TeamSummary[]): string {
       `**${division} Division**`,
       "*Division-title race — ordered by division points.*",
       "```text",
-      `${"RK".padEnd(2)} ${"TEAM".padEnd(17)} ${"DIV".padEnd(5)} ${"DP".padStart(2)}`,
+      `${"".padEnd(3)}${"TEAM".padEnd(12)} ${"REC".padEnd(5)} ${"DIV".padStart(3)} ${"PAC".padStart(3)}`,
     );
     let priorKey = "";
     let rank = 0;
@@ -256,9 +266,9 @@ function render(standings: TeamSummary[]): string {
       priorKey = key;
       const tied = rows.filter((candidate) => divisionStandingKey(candidate) === key).length > 1;
       const rankLabel = `${rank}${tied ? "T" : ""}`;
-      // This fixed-width row is deliberately capped at 29 characters so it
-      // remains intact in narrow WhatsApp chat windows.
-      lines.push(`${rankLabel.padEnd(2)} ${row.team.padEnd(17)} ${recordString(row.divisionRecord)} ${String(row.divisionPoints).padStart(2)}`);
+      // These fixed-width rows stay under 29 characters, leaving margin in
+      // the target WhatsApp chat width while keeping the columns aligned.
+      lines.push(`${rankLabel.padEnd(2)} ${gridTeamName(row.team).padEnd(12)} ${recordString(row.divisionRecord)} ${String(row.divisionPoints).padStart(3)} ${String(row.points).padStart(3)}`);
     }
     lines.push("```");
     if (tiedOnDivisionPoints(divisionRace)) {
@@ -276,33 +286,28 @@ function render(standings: TeamSummary[]): string {
   const unresolvedDivisionRaces = [...divisionRaces.entries()].filter(([, rows]) => tiedOnDivisionPoints(rows));
   lines.push("", "🎟️ **PAC Final Four Watch — Unofficial**");
 
-  if (unresolvedDivisionRaces.length) {
-    lines.push("The projected field is intentionally **not** named yet: a division championship is tied, and that result changes the wild-card pool.");
-    for (const [division, rows] of unresolvedDivisionRaces) {
-      lines.push(`• **${division} title race:** ${rows[0].team} and ${rows[1].team} are tied on division points.`);
-    }
-    lines.push("", "**PAC-points wild-card watch**");
-    lines.push("These are the conference-points leaders, but they are not labeled wild cards until the division title race is resolved:");
-    standings.sort(comparePacPoints).slice(0, 4).forEach((team) => {
-      lines.push(`• **${team.team}** — ${recordString(team.pac)} PAC (${team.points} points)`);
-    });
-  } else {
-    const divisionLeaderNames = new Set(divisionChampions.map((row) => row.team));
-    const wildCardPool = standings.filter((row) => !divisionLeaderNames.has(row.team)).sort(comparePacPoints);
-    const wildCards = wildCardPool.slice(0, 2);
-    const projectedFinalFour = [...divisionChampions, ...wildCards].sort(comparePacPoints);
+  lines.push("**Automatic bids**");
+  for (const champion of [...divisionChampions].sort((left, right) => left.division.localeCompare(right.division))) {
+    lines.push(`• **AUTO ${gridTeamName(champion.team)}** — ${champion.division} leader.`);
+  }
+  for (const [division, rows] of unresolvedDivisionRaces) {
+    lines.push(`• **AUTO TBD** — ${division}: ${gridTeamName(rows[0].team)} / ${gridTeamName(rows[1].team)} tied.`);
+  }
 
-    for (const champion of divisionChampions.sort((left, right) => left.division.localeCompare(right.division))) {
-      lines.push(`• **${champion.team}** — ${champion.division} leader; automatic-bid projection.`);
-    }
-    for (const wildCard of wildCards) {
-      lines.push(`• **${wildCard.team}** — wild-card projection; ${recordString(wildCard.pac)} PAC (${wildCard.points} points).`);
-    }
-    lines.push("", "**Provisional seed order by PAC points**");
-    projectedFinalFour.forEach((team, index) => lines.push(`${index + 1}. ${team.team} — ${team.points} PAC points`));
-    if (wildCardPool.length > 2 && wildCardPool[1].points === wildCardPool[2].points) {
-      lines.push("⚠️ The final wild-card line is tied on PAC points; official PAC tie-breaker needed.");
-    }
+  const confirmedChampionNames = new Set(divisionChampions.map((row) => row.team));
+  const wildcardPool = [...standings]
+    .filter((row) => !confirmedChampionNames.has(row.team))
+    .sort(comparePacPoints);
+  const wildcardWatch = wildcardPool.slice(0, 4);
+  lines.push("", "**Wildcard watch**", "WC1/WC2 project the two wildcard bids; Next 1/Next 2 are next in line.");
+  wildcardWatch.forEach((team, index) => {
+    const label = index < 2 ? `WC${index + 1}` : `Next ${index - 1}`;
+    lines.push(`• **${label} ${gridTeamName(team.team)}** — ${recordString(team.pac)} PAC (${team.points} points).`);
+  });
+  if (unresolvedDivisionRaces.length) {
+    lines.push("⚠️ Wildcard order remains provisional until the tied division race is resolved.");
+  } else if (wildcardWatch.length > 2 && wildcardWatch[1].points === wildcardWatch[2].points) {
+    lines.push("⚠️ The final projected wildcard line is tied on PAC points; official PAC tie-breaker needed.");
   }
 
   return lines.join("\n");
